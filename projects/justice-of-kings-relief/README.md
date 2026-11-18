@@ -14,7 +14,7 @@ artwork is copyrighted, so the source image is not stored in this repo.
 
 | File | What it is |
 | --- | --- |
-| `exports/justice_of_kings.stl` | Watertight relief mesh, ~698k triangles, 0.0125 in grid |
+| `exports/justice_of_kings.stl` | Watertight relief mesh, ~1.09M triangles, 0.010 in grid |
 | `exports/justice_of_kings_heightmap16.png` | 16-bit heightmap (white = 1.000 in, black = 0) for other CAM tools |
 | `exports/justice_of_kings_preview.png` | Shaded preview |
 
@@ -26,7 +26,7 @@ artwork is copyrighted, so the source image is not stored in this repo.
 | Statue / wings / wolves | ≈0.40–0.60 in |
 | Seated figure | ≈0.60–0.75 in |
 | Dais (foreground) | ≈0.75–0.85 in |
-| Lettering | 0.08 in above the scene under it, 0.02 in drafted edges, max 0.92 in |
+| Lettering | 0.08 in above the scene under it, 0.02 in drafted edges, max 0.98 in |
 
 Thinnest letter strokes are about 0.04 in wide ("RICHARD SWAN") and 0.055 in
 (title), so they need a fine-tipped bit to come out crisp.
@@ -35,8 +35,12 @@ Thinnest letter strokes are about 0.04 in wide ("RICHARD SWAN") and 0.055 in
 
 ```bash
 python3 tools/relief/make_relief.py <cover image> projects/justice-of-kings-relief/exports \
-  --model <depth-anything-v2-large model.onnx> --name justice_of_kings
+  --model <depth-anything-v2-large model.onnx> --name justice_of_kings \
+  --grid 0.01 --texture 0.015 --cache depth.npy
 ```
+
+The depth estimate takes about 10 minutes (one overall pass plus 24 zoomed-in
+detail tiles); `--cache` saves it so later tweaks take seconds.
 
 Useful knobs: `--base` (backing thickness; smaller = deeper relief),
 `--text-raise`, `--detail`, `--texture`, `--knee` (how much the foreground

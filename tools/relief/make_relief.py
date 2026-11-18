@@ -30,16 +30,42 @@ def text_mask(rgb):
     return cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
 
 
-def estimate_depth(rgb, model, long_side):
+def _infer(sess, rgb, W, H):
+    x = cv2.resize(rgb, (W, H), interpolation=cv2.INTER_CUBIC).astype(np.float32) / 255
+    x = ((x - [0.485, 0.456, 0.406]) / [0.229, 0.224, 0.225]).transpose(2, 0, 1)[None]
+    d = sess.run(None, {sess.get_inputs()[0].name: x.astype(np.float32)})[0].squeeze()
+    return cv2.resize(d, (rgb.shape[1], rgb.shape[0]), interpolation=cv2.INTER_CUBIC)
+
+
+def estimate_depth(rgb, model, long_side, tile, tile_res, hp_sigma):
+    """Global depth for the overall shape, plus fine detail from zoomed-in tiles.
+
+    Each overlapping tile is run through the model enlarged, matched to the
+    global depth with a least-squares scale/shift, and only its high-frequency
+    part is blended back in. Larger value = nearer.
+    """
     import onnxruntime as ort
+    sess = ort.InferenceSession(str(model), providers=["CPUExecutionProvider"])
     h, w = rgb.shape[:2]
     k = long_side / max(h, w)
-    W, H = (int(round(w * k / 14)) * 14, int(round(h * k / 14)) * 14)
-    x = cv2.resize(rgb, (W, H), interpolation=cv2.INTER_AREA).astype(np.float32) / 255
-    x = ((x - [0.485, 0.456, 0.406]) / [0.229, 0.224, 0.225]).transpose(2, 0, 1)[None]
-    sess = ort.InferenceSession(str(model), providers=["CPUExecutionProvider"])
-    d = sess.run(None, {sess.get_inputs()[0].name: x.astype(np.float32)})[0].squeeze()
-    return cv2.resize(d, (w, h), interpolation=cv2.INTER_CUBIC)  # larger = nearer
+    d = _infer(sess, rgb, int(round(w * k / 14)) * 14, int(round(h * k / 14)) * 14).astype(np.float64)
+    if not tile:
+        return d
+    hp = lambda x: x - cv2.GaussianBlur(x, (0, 0), hp_sigma)
+    acc, wsum = np.zeros_like(d), np.zeros_like(d)
+    win1 = np.hanning(tile + 2)[1:-1]
+    win = np.outer(win1, win1) + 1e-3
+    starts = lambda n: sorted({min(s, n - tile) for s in range(0, n - tile // 2, tile // 2)})
+    for y in starts(h):
+        for x in starts(w):
+            g = d[y:y + tile, x:x + tile]
+            t = _infer(sess, rgb[y:y + tile, x:x + tile], tile_res, tile_res).astype(np.float64)
+            A = np.stack([t.ravel(), np.ones(t.size)], 1)
+            a, b = np.linalg.lstsq(A, g.ravel(), rcond=None)[0]
+            acc[y:y + tile, x:x + tile] += win * hp(max(a, 0) * t + b)
+            wsum[y:y + tile, x:x + tile] += win
+            print(f"tile {x},{y} scale {a:.2f}", flush=True)
+    return d - hp(d) + acc / wsum
 
 
 def write_stl(path, z, dx, dy):
@@ -80,6 +106,8 @@ def shade(z, px):
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("image"); p.add_argument("outdir"); p.add_argument("--model", required=True)
+    p.add_argument("--tile", type=int, default=560, help="detail tile size in px (0 = off)")
+    p.add_argument("--cache", help="npy file to store/reuse the depth estimate")
     p.add_argument("--name", default="relief")
     p.add_argument("--width", type=float, default=6.0, help="inches")
     p.add_argument("--height", type=float, default=9.0, help="inches")
@@ -107,7 +135,13 @@ def main():
 
     tm = text_mask(rgb)
     clean = cv2.inpaint(rgb, cv2.dilate(tm, np.ones((13, 13), np.uint8)), 9, cv2.INPAINT_TELEA)
-    d = estimate_depth(clean, a.model, 1554).astype(np.float64)
+    cache = Path(a.cache) if a.cache else None
+    if cache and cache.exists():
+        d = np.load(cache)
+    else:
+        d = estimate_depth(clean, a.model, 1554, a.tile, 1036, 0.07 * ppi)
+        if cache:
+            np.save(cache, d)
 
     # --- scene: normalise, flatten the backdrop, compress the near foreground
     hi = np.percentile(d, 99.8)
