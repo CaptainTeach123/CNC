@@ -5,3 +5,4 @@
 *.stl binary
 *.nc text eol=lf
 *.gcode text eol=lf
+*.png binary
