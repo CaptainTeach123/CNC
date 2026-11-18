@@ -1,0 +1,7 @@
+*.f3d binary
+*.f3z binary
+*.step binary
+*.stp binary
+*.stl binary
+*.nc text eol=lf
+*.gcode text eol=lf
