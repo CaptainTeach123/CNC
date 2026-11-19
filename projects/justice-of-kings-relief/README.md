@@ -14,7 +14,7 @@ artwork is copyrighted, so the source image is not stored in this repo.
 
 | File | What it is |
 | --- | --- |
-| `exports/justice_of_kings.stl` | Watertight relief mesh, ~1.3M triangles (4.3M-triangle 0.010 in grid, adaptively decimated) |
+| `exports/justice_of_kings.stl` | Relief mesh on a solid base, ~1.3M triangles (4.3M-triangle 0.010 in grid, adaptively decimated; 12 open edges left by decimation) |
 | `exports/justice_of_kings_heightmap16.png` | 16-bit heightmap, 1201 × 1801 px at 0.010 in per pixel (white = 1.000 in, black = 0) |
 | `exports/justice_of_kings_preview.png` | Shaded preview |
 
@@ -62,8 +62,9 @@ dais is flattened), `--grid` (mesh resolution), `--keep` (fraction of triangles 
 3. **Roughing — 3D Adaptive Clearing**, 1/4 in flat end mill, leave 0.02 in
    radial and axial stock.
 4. **Finishing — 3D Parallel**, tapered ball nose (1/32 in tip radius or
-   smaller, ≥ 0.85 in reach), stepover about 0.005–0.008 in. Expect several
-   hours. A second pass at 90° cleans up the lettering.
+   smaller, ≥ 0.85 in reach), stepover about 0.005–0.008 in. Expect roughly
+   6-10 hours at this size (untested estimate; the free licence posts rapids
+   at feed rate). A second pass at 90° cleans up the lettering.
 5. Post each operation as its own file with the Grbl post (no automatic tool
    change on the free licence) into `gcode/`.
 
