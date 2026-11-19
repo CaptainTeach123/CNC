@@ -14,12 +14,24 @@ artwork is copyrighted, so the source image is not stored in this repo.
 
 | File | What it is |
 | --- | --- |
-| `exports/justice_of_kings.stl` | Relief mesh on a solid base, ~1.3M triangles (4.3M-triangle 0.010 in grid, adaptively decimated; 12 open edges left by decimation) |
-| `exports/justice_of_kings_heightmap16.png` | 16-bit heightmap, 1201 × 1801 px at 0.010 in per pixel (white = 1.000 in, black = 0) |
-| `exports/justice_of_kings_preview.png` | Shaded preview |
+| `exports/justice_of_kings.stl` | Relief with lettering, ~1.3M triangles (4.3M-triangle 0.010 in grid, adaptively decimated) |
+| `exports/justice_of_kings_no_text.stl` | Same relief without the lettering |
+| `exports/*_heightmap16.png` | 16-bit heightmaps, 1201 × 1801 px at 0.010 in per pixel (white = 1.000 in, black = 0) |
+| `exports/*_preview.png` | Shaded previews |
 
 An earlier 6 × 9 in version is in the git history and can be regenerated with
 `--width 6 --height 9`.
+
+## How it was made
+
+Two source images: the book cover (1304 px wide) and a lettering-free copy of
+the same painting (873 px wide). The lettering-free copy is aligned to the
+cover automatically and used to (a) fill in the scene underneath the lettering
+and (b) find the lettering exactly, by comparing the two. The result is
+sharpened 2x with a super-resolution model, then depth is estimated in four
+passes: the whole image, then tiles of about 43 %, 21 % and 11 % of the width.
+The finest pass is only allowed to make small changes, because on its own it
+flattens thin structures such as the chains of the scales.
 
 ## Heights (all estimated from the picture)
 
@@ -28,26 +40,30 @@ An earlier 6 × 9 in version is in the git history and can be regenerated with
 | Flat backdrop | 0.20 in (deepest cut is 0.80 in from the top) |
 | Statue / wings / wolves | ≈0.32–0.55 in |
 | Seated figure | ≈0.55–0.72 in |
-| Dais (foreground) | ≈0.72–0.85 in |
-| Lettering | 0.11 in above the scene under it, 0.03 in drafted edges, max 0.97 in |
+| Dais (foreground) | ≈0.72–0.89 in |
+| Lettering | 0.11 in above the scene under it, max 0.99 in |
 
-Thinnest letter strokes are about 0.08 in wide ("RICHARD SWAN") and 0.11 in
-(title). The relief is the same depth as the 6 × 9 version but spread over
-twice the width, so it is proportionally shallower; thicker stock
-(`--thickness 1.5` or `2`) restores the depth.
+Letter strokes were thickened by 0.006 in per side; the thinnest hairlines
+(crossbars, serifs) are about 0.04 in wide, main strokes 0.08–0.11 in. The
+relief depth is the same as the 6 × 9 version but spread over twice the width,
+so it is proportionally shallower; thicker stock (`--thickness 1.5` or `2`)
+restores the depth.
 
 ## Regenerating / adjusting
 
 ```bash
 python3 tools/relief/make_relief.py <cover image> projects/justice-of-kings-relief/exports \
-  --model <depth-anything-v2-large model.onnx> --name justice_of_kings --cache depth.npy \
-  --width 12 --height 18 --base 0.2 --text-raise 0.11 --text-draft 0.03 \
-  --texture 0.02 --upscale 2 --grid 0.01 --keep 0.3
+  --art <lettering-free image> --model <depth-anything-v2-large model.onnx> \
+  --sr-model <swin2SR x4 model.onnx> --name justice_of_kings --cache work/dep.npy \
+  --width 12 --height 18 --base 0.2 --text-raise 0.11 --text-draft 0.015 --text-grow 0.006 \
+  --texture 0.02 --grid 0.01 --keep 0.3 --detail-levels 3
 ```
 
-The depth estimate takes about 25 minutes on 4 CPU cores: one overall pass, 24
-zoomed-in tiles, then about 100 smaller tiles for the finest detail. `--cache`
-saves each stage so later tweaks take about a minute.
+Add `--no-text --name justice_of_kings_no_text` for the lettering-free variant.
+
+From scratch this takes about 2.5 hours on 4 CPU cores (10 min sharpening,
+then roughly 1, 9, 45 and 80 min for the four depth passes). `--cache` saves
+every stage, so later tweaks to heights or lettering take about a minute.
 
 Useful knobs: `--base` (backing thickness; smaller = deeper relief),
 `--text-raise`, `--detail`, `--texture`, `--knee` (how much the foreground
