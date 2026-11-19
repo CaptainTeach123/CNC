@@ -37,21 +37,22 @@ def _infer(sess, rgb, W, H):
     return cv2.resize(d, (rgb.shape[1], rgb.shape[0]), interpolation=cv2.INTER_CUBIC)
 
 
-def estimate_depth(rgb, model, long_side, tile, tile_res, hp_sigma):
-    """Global depth for the overall shape, plus fine detail from zoomed-in tiles.
-
-    Each overlapping tile is run through the model enlarged, matched to the
-    global depth with a least-squares scale/shift, and only its high-frequency
-    part is blended back in. Larger value = nearer.
-    """
-    import onnxruntime as ort
-    sess = ort.InferenceSession(str(model), providers=["CPUExecutionProvider"])
+def global_depth(sess, rgb, long_side):
     h, w = rgb.shape[:2]
     k = long_side / max(h, w)
-    d = _infer(sess, rgb, int(round(w * k / 14)) * 14, int(round(h * k / 14)) * 14).astype(np.float64)
-    if not tile:
-        return d
+    return _infer(sess, rgb, int(round(w * k / 14)) * 14, int(round(h * k / 14)) * 14).astype(np.float64)
+
+
+def add_tile_detail(sess, rgb, d, tile, tile_res, hp_sigma):
+    """Replace the fine detail of depth map d with detail from zoomed-in tiles.
+
+    Each overlapping tile is run through the model enlarged, matched to d with
+    a least-squares scale/shift, and only its high-frequency part is blended
+    back in. Tiles that are all backdrop are skipped. Larger value = nearer.
+    """
+    h, w = d.shape
     hp = lambda x: x - cv2.GaussianBlur(x, (0, 0), hp_sigma)
+    flat = 0.03 * (d.max() - d.min())
     acc, wsum = np.zeros_like(d), np.zeros_like(d)
     win1 = np.hanning(tile + 2)[1:-1]
     win = np.outer(win1, win1) + 1e-3
@@ -59,16 +60,50 @@ def estimate_depth(rgb, model, long_side, tile, tile_res, hp_sigma):
     for y in starts(h):
         for x in starts(w):
             g = d[y:y + tile, x:x + tile]
-            t = _infer(sess, rgb[y:y + tile, x:x + tile], tile_res, tile_res).astype(np.float64)
-            A = np.stack([t.ravel(), np.ones(t.size)], 1)
-            a, b = np.linalg.lstsq(A, g.ravel(), rcond=None)[0]
-            acc[y:y + tile, x:x + tile] += win * hp(max(a, 0) * t + b)
+            if np.ptp(g) < flat:
+                fit = g
+            else:
+                t = _infer(sess, rgb[y:y + tile, x:x + tile], tile_res, tile_res).astype(np.float64)
+                A = np.stack([t.ravel(), np.ones(t.size)], 1)
+                a, b = np.linalg.lstsq(A, g.ravel(), rcond=None)[0]
+                fit = max(a, 0) * t + b
+            acc[y:y + tile, x:x + tile] += win * hp(fit)
             wsum[y:y + tile, x:x + tile] += win
-            print(f"tile {x},{y} scale {a:.2f}", flush=True)
+        print(f"  tile row y={y} done", flush=True)
     return d - hp(d) + acc / wsum
 
 
-def write_stl(path, z, dx, dy):
+def estimate_depth(rgb, model, levels, ppi, cache):
+    """Global pass, then one detail pass per (tile px, model px, blend inches) level.
+    Every stage is cached next to `cache` so reruns only compute what is missing."""
+    sess = None
+    def session():
+        nonlocal sess
+        if sess is None:
+            import onnxruntime as ort
+            sess = ort.InferenceSession(str(model), providers=["CPUExecutionProvider"])
+        return sess
+    d = None
+    for i, lv in enumerate([None] + levels):
+        f = cache.with_suffix(f".L{i}.npy") if cache else None
+        if f and f.exists():
+            d = np.load(f); continue
+        print(f"depth level {i}", flush=True)
+        d = global_depth(session(), rgb, 1554) if lv is None else add_tile_detail(session(), rgb, d, lv[0], lv[1], lv[2] * ppi)
+        if f:
+            np.save(f, d)
+    return d
+
+
+def decimate(tris, keep):
+    """Quadric decimation: keeps triangles where the detail is, drops them on flats."""
+    import fast_simplification
+    v, inv = np.unique(tris.reshape(-1, 3), axis=0, return_inverse=True)
+    pts, faces = fast_simplification.simplify(v, inv.reshape(-1, 3), target_reduction=1 - keep)
+    return pts[faces].astype(np.float32)
+
+
+def write_stl(path, z, dx, dy, keep=1.0):
     """Heightfield z[row, col] (row 0 = top of picture) on a flat base at Z=0."""
     ny, nx = z.shape
     xs = np.arange(nx) * dx
@@ -86,6 +121,8 @@ def write_stl(path, z, dx, dy):
     ctr = np.array([xs.mean(), ys.mean(), 0], np.float32)
     tris.append(np.stack([np.broadcast_to(ctr, r0.shape), n0, r0], 1))           # bottom fan
     t = np.concatenate(tris).astype(np.float32)
+    if keep < 1:
+        t = decimate(t, keep)
     nrm = np.cross(t[:, 1] - t[:, 0], t[:, 2] - t[:, 0])
     nrm /= np.maximum(np.linalg.norm(nrm, axis=1, keepdims=True), 1e-12)
     rec = np.zeros(len(t), dtype=[("n", "<f4", 3), ("v", "<f4", (3, 3)), ("a", "<u2")])
@@ -106,8 +143,10 @@ def shade(z, px):
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("image"); p.add_argument("outdir"); p.add_argument("--model", required=True)
-    p.add_argument("--tile", type=int, default=560, help="detail tile size in px (0 = off)")
-    p.add_argument("--cache", help="npy file to store/reuse the depth estimate")
+    p.add_argument("--detail-levels", type=int, default=2, help="tiled detail passes: 0, 1 or 2")
+    p.add_argument("--upscale", type=float, default=1.0, help="working-resolution multiplier")
+    p.add_argument("--keep", type=float, default=1.0, help="fraction of triangles kept by adaptive decimation")
+    p.add_argument("--cache", help="npy path prefix to store/reuse the depth stages")
     p.add_argument("--name", default="relief")
     p.add_argument("--width", type=float, default=6.0, help="inches")
     p.add_argument("--height", type=float, default=9.0, help="inches")
@@ -135,13 +174,16 @@ def main():
 
     tm = text_mask(rgb)
     clean = cv2.inpaint(rgb, cv2.dilate(tm, np.ones((13, 13), np.uint8)), 9, cv2.INPAINT_TELEA)
-    cache = Path(a.cache) if a.cache else None
-    if cache and cache.exists():
-        d = np.load(cache)
-    else:
-        d = estimate_depth(clean, a.model, 1554, a.tile, 1036, 0.07 * ppi)
-        if cache:
-            np.save(cache, d)
+    levels = [(560, 1036, 0.07), (280, 770, 0.03)][:a.detail_levels]
+    d = estimate_depth(clean, a.model, levels, ppi, Path(a.cache) if a.cache else None)
+
+    # work at a finer pixel pitch so edges stay smooth on larger pieces
+    if a.upscale > 1:
+        W, H = int(w * a.upscale), int(h * a.upscale)
+        up = lambda x: cv2.resize(x, (W, H), interpolation=cv2.INTER_CUBIC)
+        d, clean = up(d), cv2.resize(clean, (W, H), interpolation=cv2.INTER_LANCZOS4)
+        tm = (up(cv2.GaussianBlur(tm.astype(np.float32), (0, 0), 0.8)) > 0.5).astype(np.uint8)
+        h, w, ppi = H, W, W / a.width
 
     # --- scene: normalise, flatten the backdrop, compress the near foreground
     hi = np.percentile(d, 99.8)
@@ -150,7 +192,9 @@ def main():
     s = np.where(s > a.knee, a.knee + (s - a.knee) * 0.45, s)
     s /= s.max()
     # local-relief boost (unsharp mask at two scales), kept off the backdrop
-    g = lambda x, inch: cv2.GaussianBlur(x, (0, 0), inch * ppi)
+    # smoothing radii below are quoted for a 6 in wide piece and scale with size
+    sc = a.width / 6.0
+    g = lambda x, inch: cv2.GaussianBlur(x, (0, 0), inch * sc * ppi)
     fg = np.clip(s / 0.08, 0, 1)
     s = s + a.detail * fg * (0.6 * (s - g(s, 0.25)) + 0.8 * (s - g(s, 0.06)))
     s = np.clip(s, 0, None); s /= np.percentile(s, 99.95); s = np.clip(s, 0, 1)
@@ -166,7 +210,7 @@ def main():
     # --- lettering: rides on a smoothed copy of the scene, with drafted edges
     dist = cv2.distanceTransform(tm, cv2.DIST_L2, 5) / ppi
     ramp = np.clip(dist / a.text_draft, 0, 1)
-    k = int(0.08 * ppi) | 1
+    k = int(0.08 * sc * ppi) | 1
     carrier = g(cv2.dilate(z, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))), 0.08)
     ztext = carrier + a.text_raise * ramp
     z = np.where(tm > 0, np.maximum(z, ztext), z)
@@ -176,9 +220,9 @@ def main():
     nx, ny = int(round(a.width / a.grid)) + 1, int(round(a.height / a.grid)) + 1
     zg = cv2.resize(z, (nx, ny), interpolation=cv2.INTER_AREA)
     zg = np.clip(zg, a.base, a.thickness)
-    n = write_stl(out / f"{a.name}.stl", zg * IN, a.width * IN / (nx - 1), a.height * IN / (ny - 1))
+    n = write_stl(out / f"{a.name}.stl", zg * IN, a.width * IN / (nx - 1), a.height * IN / (ny - 1), a.keep)
     Image.fromarray(np.round(zg / a.thickness * 65535).astype(np.uint16)).save(out / f"{a.name}_heightmap16.png")
-    Image.fromarray(shade(z, 1 / ppi)).resize((w // 2, h // 2), Image.LANCZOS).save(out / f"{a.name}_preview.png")
+    Image.fromarray(shade(z, 1 / ppi)).resize((1304, int(1304 * h / w)), Image.LANCZOS).save(out / f"{a.name}_preview.png")
     print(f"{nx}x{ny} grid, {n} triangles, Z {zg.min():.3f}..{zg.max():.3f} in, "
           f"size {a.width}x{a.height}x{a.thickness} in (STL in mm)")
 
